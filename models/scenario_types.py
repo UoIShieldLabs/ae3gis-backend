@@ -175,9 +175,9 @@ class ScenarioDeployRequest(BaseModel):
     start_nodes: bool = Field(default=True, description="Start nodes after creation.")
     run_scripts: bool = Field(default=True, description="Execute embedded scripts after starting nodes.")
     priority_delay: float = Field(
-        default=3.0,
+        default=0.5,
         ge=0.0,
-        description="Delay in seconds between different priority groups."
+        description="Delay in seconds between different priority groups. Scripts within the same priority run concurrently."
     )
     definition: ScenarioDefinition | None = Field(
         default=None,

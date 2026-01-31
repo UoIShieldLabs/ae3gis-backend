@@ -110,66 +110,42 @@ def delete_scenario(
 # Scenario Deployment Endpoint
 # -----------------------------------------------------------------------------
 
+# Concurrency limit for parallel operations
+MAX_CONCURRENT_SCRIPTS = 8
 
-async def _execute_embedded_scripts(
-    definition: ScenarioDefinition,
+
+async def _execute_single_script(
+    node_name: str,
+    script: Any,
     config_record: MutableMapping[str, Any],
     gns3_server_ip: str,
     pusher: ScriptPusher,
-    priority_delay: float,
-) -> list[ScriptExecutionSummary]:
-    """
-    Execute all embedded scripts from nodes in priority order.
-    
-    Scripts are sorted by priority (lower first). A delay is added
-    between different priority groups to allow services to initialize.
-    """
-    # Collect all scripts with their node info
-    script_tasks: list[tuple[int, str, Any]] = []
-    
-    for node in definition.nodes:
-        for script in node.scripts:
-            script_tasks.append((script.priority, node.name, script))
-    
-    if not script_tasks:
-        return []
-    
-    # Sort by priority
-    script_tasks.sort(key=lambda x: x[0])
-    
-    results: list[ScriptExecutionSummary] = []
-    current_priority: int | None = None
-    
-    for priority, node_name, script in script_tasks:
-        # Add delay when moving to a new priority group
-        if current_priority is not None and priority > current_priority and priority_delay > 0:
-            await asyncio.sleep(priority_delay)
-        current_priority = priority
-        
+    semaphore: asyncio.Semaphore,
+) -> ScriptExecutionSummary:
+    """Execute a single script on a node."""
+    async with semaphore:
         # Find node in config to get console info
         node = find_node_by_name(config_record, node_name)
         if node is None:
-            results.append(ScriptExecutionSummary(
+            return ScriptExecutionSummary(
                 node_name=node_name,
                 script_name=script.name,
-                priority=priority,
+                priority=script.priority,
                 remote_path=script.remote_path,
                 success=False,
                 error=f"Node '{node_name}' not found in config",
-            ))
-            continue
+            )
         
         target = resolve_console_target(node, gns3_server_ip)
         if target is None:
-            results.append(ScriptExecutionSummary(
+            return ScriptExecutionSummary(
                 node_name=node_name,
                 script_name=script.name,
-                priority=priority,
+                priority=script.priority,
                 remote_path=script.remote_path,
                 success=False,
                 error=f"Node '{node_name}' does not expose a telnet console",
-            ))
-            continue
+            )
         
         host, port = target
         
@@ -195,23 +171,92 @@ async def _execute_embedded_scripts(
             elif push_result.execution and not push_result.execution.success:
                 error = push_result.execution.error
             
-            results.append(ScriptExecutionSummary(
+            return ScriptExecutionSummary(
                 node_name=node_name,
                 script_name=script.name,
-                priority=priority,
+                priority=script.priority,
                 remote_path=script.remote_path,
                 success=success,
                 error=error,
-            ))
+            )
         except Exception as exc:
-            results.append(ScriptExecutionSummary(
+            return ScriptExecutionSummary(
                 node_name=node_name,
                 script_name=script.name,
-                priority=priority,
+                priority=script.priority,
                 remote_path=script.remote_path,
                 success=False,
                 error=str(exc),
-            ))
+            )
+
+
+async def _execute_embedded_scripts(
+    definition: ScenarioDefinition,
+    config_record: MutableMapping[str, Any],
+    gns3_server_ip: str,
+    pusher: ScriptPusher,
+    priority_delay: float,
+) -> list[ScriptExecutionSummary]:
+    """
+    Execute all embedded scripts from nodes in priority order.
+    
+    Scripts with the same priority are executed concurrently (up to MAX_CONCURRENT_SCRIPTS).
+    Different priority groups are executed sequentially, with an optional delay between groups.
+    """
+    # Collect all scripts with their node info
+    script_tasks: list[tuple[int, str, Any]] = []
+    
+    for node in definition.nodes:
+        for script in node.scripts:
+            script_tasks.append((script.priority, node.name, script))
+    
+    if not script_tasks:
+        return []
+    
+    # Sort by priority
+    script_tasks.sort(key=lambda x: x[0])
+    
+    # Group by priority
+    from itertools import groupby
+    priority_groups: list[tuple[int, list[tuple[str, Any]]]] = []
+    for priority, group in groupby(script_tasks, key=lambda x: x[0]):
+        scripts_in_group = [(node_name, script) for _, node_name, script in group]
+        priority_groups.append((priority, scripts_in_group))
+    
+    results: list[ScriptExecutionSummary] = []
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCRIPTS)
+    previous_priority: int | None = None
+    
+    for priority, scripts_in_group in priority_groups:
+        # Add delay when moving to a new priority group (skip for first group)
+        if previous_priority is not None and priority_delay > 0:
+            await asyncio.sleep(priority_delay)
+        previous_priority = priority
+        
+        # Execute all scripts in this priority group concurrently
+        tasks = [
+            _execute_single_script(
+                node_name, script, config_record, gns3_server_ip, pusher, semaphore
+            )
+            for node_name, script in scripts_in_group
+        ]
+        
+        # Gather results (return_exceptions=True to continue on failures)
+        group_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for result in group_results:
+            if isinstance(result, Exception):
+                # This shouldn't happen since we catch exceptions in _execute_single_script
+                results.append(ScriptExecutionSummary(
+                    node_name="unknown",
+                    script_name="unknown",
+                    priority=priority,
+                    remote_path="",
+                    success=False,
+                    error=str(result),
+                ))
+            else:
+                results.append(result)
     
     return results
 
