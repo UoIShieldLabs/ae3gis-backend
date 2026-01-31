@@ -104,8 +104,41 @@ class SubmissionRepository:
             submitted_at=datetime.fromisoformat(metadata["submitted_at"]),
             project_name=metadata["project_name"],
             it_logs=it_logs,
-            ot_logs=ot_logs
+            ot_logs=ot_logs,
+            ai_analysis=metadata.get("ai_analysis"),
+            analyzed_at=datetime.fromisoformat(metadata["analyzed_at"]) if metadata.get("analyzed_at") else None,
+            model_used=metadata.get("model_used"),
         )
+
+    def save_analysis(
+        self,
+        student_name: str,
+        submission_id: str,
+        analysis: str,
+        model_used: str,
+    ) -> bool:
+        """Save AI analysis to an existing submission.
+        
+        Returns True if successful, False if submission not found.
+        """
+        sub_dir = self._get_submission_dir(student_name, submission_id)
+        metadata_path = sub_dir / "metadata.json"
+        
+        if not metadata_path.exists():
+            return False
+        
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+        
+        # Update metadata with analysis
+        metadata["ai_analysis"] = analysis
+        metadata["analyzed_at"] = datetime.utcnow().isoformat()
+        metadata["model_used"] = model_used
+        
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        
+        return True
 
     def list_for_student(self, student_name: str) -> list[SubmissionSummary]:
         """List all submissions for a student."""
@@ -142,7 +175,8 @@ class SubmissionRepository:
                     submitted_at=datetime.fromisoformat(metadata["submitted_at"]),
                     project_name=metadata["project_name"],
                     it_log_lines=it_lines,
-                    ot_log_lines=ot_lines
+                    ot_log_lines=ot_lines,
+                    has_analysis=bool(metadata.get("ai_analysis")),
                 ))
             except Exception:
                 continue  # Skip invalid submissions

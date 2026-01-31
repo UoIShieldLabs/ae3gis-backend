@@ -11,7 +11,7 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 # Default model - can be overridden via OPENAI_MODEL env var
-DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "gpt-5.2"
 
 SYSTEM_PROMPT = """You are a cybersecurity lab instructor analyzing student command history logs from a network security lab session.
 
@@ -19,12 +19,10 @@ The logs contain commands executed by the student on various network nodes (serv
 
 Your task is to:
 1. Summarize what the student did during the lab session
-2. Identify key actions and their purpose (e.g., network reconnaissance, service configuration, exploitation attempts)
+2. Identify key actions
 3. Note any potential mistakes, security issues, or misconfigurations
-4. Assess the student's understanding of the lab objectives based on their commands
-5. Provide constructive feedback for improvement
 
-Be very concise but thorough. Focus on the security and networking aspects of the commands.
+Be very concise.
 """
 
 
@@ -101,7 +99,7 @@ class AIAnalyzer:
                     {"role": "user", "content": user_message},
                 ],
                 temperature=0.3,  # Lower temperature for more consistent analysis
-                max_tokens=2000,
+                max_completion_tokens=1000,
             )
             
             analysis = response.choices[0].message.content or "No analysis generated."

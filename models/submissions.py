@@ -107,6 +107,9 @@ class Submission(BaseModel):
     project_name: str
     it_logs: str = Field(default="", description="IT-side collector logs")
     ot_logs: str = Field(default="", description="OT-side collector logs")
+    ai_analysis: str | None = Field(default=None, description="AI-generated analysis of the logs")
+    analyzed_at: datetime | None = Field(default=None, description="When AI analysis was performed")
+    model_used: str | None = Field(default=None, description="OpenAI model used for analysis")
 
 
 class SubmissionSummary(BaseModel):
@@ -119,6 +122,7 @@ class SubmissionSummary(BaseModel):
     project_name: str
     it_log_lines: int
     ot_log_lines: int
+    has_analysis: bool = Field(default=False, description="Whether AI analysis has been performed")
 
 
 class StudentSummary(BaseModel):
@@ -150,3 +154,33 @@ class TeardownResponse(BaseModel):
     student_name: str
     removed_nodes: list[str] = Field(default_factory=list)
     message: str = Field(default="Logging teardown complete")
+
+
+class AnalyzeLogsRequest(BaseModel):
+    """Request to analyze student logs using AI."""
+    
+    gns3_server_ip: str | None = Field(
+        default=None,
+        description="GNS3 server IP (required if analyzing live logs)"
+    )
+    gns3_server_port: int = Field(default=80, description="GNS3 server port")
+    username: str = Field(default="admin", description="GNS3 username")
+    password: str = Field(default="admin", description="GNS3 password")
+
+
+class AnalyzeLogsResponse(BaseModel):
+    """Response containing AI-generated analysis of student logs."""
+    
+    student_name: str = Field(..., description="Sanitized student name")
+    display_name: str = Field(..., description="Original student name")
+    submission_id: str | None = Field(
+        default=None,
+        description="Submission ID if analyzing a saved submission"
+    )
+    source: str = Field(
+        ...,
+        description="Source of logs: 'submission' or 'live'"
+    )
+    summary: str = Field(..., description="AI-generated analysis of student actions")
+    analyzed_at: datetime = Field(default_factory=datetime.utcnow)
+    model_used: str = Field(..., description="OpenAI model used for analysis")

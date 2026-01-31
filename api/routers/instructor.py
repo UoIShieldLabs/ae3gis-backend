@@ -5,12 +5,22 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+import requests
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from core.student_store import get_student_repository, sanitize_student_name
 from core.submission_store import get_submission_repository
-from models.submissions import StudentSummary, SubmissionSummary, Submission
+from core.gns3_client import GNS3Client
+from core.log_collector import retrieve_all_logs
+from core.ai_analyzer import get_ai_analyzer
+from models.submissions import (
+    StudentSummary,
+    SubmissionSummary,
+    Submission,
+    AnalyzeLogsRequest,
+    AnalyzeLogsResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +60,9 @@ class SubmissionDetailResponse(BaseModel):
     ot_logs: str
     it_log_lines: int
     ot_log_lines: int
+    ai_analysis: str | None = None
+    analyzed_at: str | None = None
+    model_used: str | None = None
 
 
 @router.get(
@@ -143,6 +156,9 @@ async def get_submission(
         ot_logs=submission.ot_logs,
         it_log_lines=len(submission.it_logs.splitlines()) if submission.it_logs else 0,
         ot_log_lines=len(submission.ot_logs.splitlines()) if submission.ot_logs else 0,
+        ai_analysis=submission.ai_analysis,
+        analyzed_at=submission.analyzed_at.isoformat() if submission.analyzed_at else None,
+        model_used=submission.model_used,
     )
 
 
@@ -280,4 +296,184 @@ async def reset_all() -> ResetResponse:
     return ResetResponse(
         deleted_count=total,
         message=f"Deleted {students_deleted} student session(s) and {submissions_deleted} submission(s)",
+    )
+
+
+# -----------------------------------------------------------------------------
+# AI Analysis Endpoint
+# -----------------------------------------------------------------------------
+
+
+def _create_gns3_client(
+    server_ip: str,
+    server_port: int = 80,
+    username: str = "admin",
+    password: str = "admin",
+) -> GNS3Client:
+    """Create a GNS3 client with the provided credentials."""
+    session = requests.Session()
+    session.auth = (username, password)
+    base_url = f"http://{server_ip}:{server_port}"
+    return GNS3Client(base_url=base_url, session=session)
+
+
+@router.post(
+    "/students/{student_name}/analyze",
+    response_model=AnalyzeLogsResponse,
+    summary="Analyze student logs using AI",
+    description="""
+Use OpenAI to analyze a student's command history logs and generate a summary.
+
+By default, analyzes the most recent submission. Use query parameters to:
+- Analyze a specific submission: `?submission_id=abc123`
+- Analyze live logs: `?live=true` (requires GNS3 credentials in request body)
+
+The analysis is saved to the submission for future reference.
+
+Requires OPENAI_API_KEY environment variable to be set.
+""",
+)
+async def analyze_student_logs(
+    student_name: str,
+    submission_id: str | None = Query(
+        default=None,
+        description="Specific submission ID to analyze. If not provided, uses most recent."
+    ),
+    live: bool = Query(
+        default=False,
+        description="If true, analyze current live logs instead of a submission."
+    ),
+    request: AnalyzeLogsRequest | None = None,
+) -> AnalyzeLogsResponse:
+    """Analyze student logs using AI."""
+    try:
+        sanitized = sanitize_student_name(student_name)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    
+    student_repo = get_student_repository()
+    submission_repo = get_submission_repository()
+    
+    # Get student session info
+    session = student_repo.get(sanitized)
+    display_name = session.display_name if session else student_name.strip()
+    
+    it_logs: str = ""
+    ot_logs: str = ""
+    project_name: str = ""
+    source: str = "submission"
+    used_submission_id: str | None = None
+    
+    if live:
+        # Analyze live logs
+        source = "live"
+        
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No active logging session for student '{student_name}'",
+            )
+        
+        if not request or not request.gns3_server_ip:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GNS3 server IP required in request body for live log analysis",
+            )
+        
+        if not session.snitch_nodes:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No syslog collectors found for this student",
+            )
+        
+        client = _create_gns3_client(
+            request.gns3_server_ip,
+            request.gns3_server_port,
+            request.username,
+            request.password,
+        )
+        
+        try:
+            logs, errors = await retrieve_all_logs(
+                client=client,
+                project_id=session.project_id,
+                gns3_server_ip=request.gns3_server_ip,
+                snitch_nodes=session.snitch_nodes,
+            )
+            it_logs = logs.get("it", "")
+            ot_logs = logs.get("ot", "")
+            project_name = session.project_name
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve live logs: {e}",
+            )
+    else:
+        # Analyze submission logs
+        if submission_id:
+            # Get specific submission
+            submission = submission_repo.get(sanitized, submission_id)
+            if not submission:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Submission '{submission_id}' not found for student '{student_name}'",
+                )
+        else:
+            # Get most recent submission
+            submissions = submission_repo.list_for_student(sanitized)
+            if not submissions:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No submissions found for student '{student_name}'",
+                )
+            submission = submission_repo.get(sanitized, submissions[0].id)
+            if not submission:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Failed to retrieve submission",
+                )
+        
+        it_logs = submission.it_logs
+        ot_logs = submission.ot_logs
+        project_name = submission.project_name
+        used_submission_id = submission.id
+        display_name = submission.display_name
+    
+    # Perform AI analysis
+    try:
+        analyzer = get_ai_analyzer()
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"AI analysis not available: {e}",
+        )
+    
+    try:
+        analysis, model_used = analyzer.analyze_logs(
+            it_logs=it_logs,
+            ot_logs=ot_logs,
+            student_name=display_name,
+            project_name=project_name,
+        )
+    except Exception as e:
+        logger.exception("AI analysis failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"AI analysis failed: {e}",
+        )
+    
+    # Save analysis to submission if analyzing a submission
+    if used_submission_id:
+        submission_repo.save_analysis(sanitized, used_submission_id, analysis, model_used)
+    
+    return AnalyzeLogsResponse(
+        student_name=sanitized,
+        display_name=display_name,
+        submission_id=used_submission_id,
+        source=source,
+        summary=analysis,
+        model_used=model_used,
     )

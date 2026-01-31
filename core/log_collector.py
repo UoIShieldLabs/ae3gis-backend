@@ -305,71 +305,102 @@ class LogCollector:
             logger.error(f"Failed to connect {collector_node.get('name')} to {switch_name}: {e}")
             return False
 
+    async def _setup_single_collector(
+        self,
+        student_name: str,
+        config: CollectorConfig,
+        template_id: str,
+    ) -> tuple[SnitchNodeInfo | None, list[str], bool]:
+        """Setup a single collector node.
+        
+        Returns (snitch_info, errors, reused).
+        """
+        errors: list[str] = []
+        reused = False
+        
+        try:
+            # Create or reuse collector node
+            node, reused = self._create_collector_node(student_name, config, template_id)
+            
+            # Connect to switch (skip if already connected)
+            if not reused:
+                self._connect_to_switch(node, config.switch_name)
+            
+            # Refresh node data to get console info
+            node = self.client.get_node(self.project_id, node["node_id"])
+            
+            # Start the node
+            self.client.start_node(self.project_id, node["node_id"])
+            
+            # Wait for boot
+            await asyncio.sleep(3)
+            
+            # Get IP address (via DHCP or already assigned)
+            ip_address = await self._get_node_ip_address(node)
+            
+            if not ip_address:
+                error_msg = f"Failed to obtain IP for {config.name_suffix} - ensure DHCP server is running or assign static IP"
+                logger.error(error_msg)
+                errors.append(error_msg)
+                return None, errors, reused
+            
+            # Ensure syslog-ng is running on the collector
+            syslog_running = await self._ensure_syslog_running(node)
+            if not syslog_running:
+                error_msg = f"Warning: syslog-ng may not be running on {config.name_suffix}"
+                logger.warning(error_msg)
+                errors.append(error_msg)
+                # Continue anyway - it might still work
+            
+            snitch_info = SnitchNodeInfo(
+                node_id=node["node_id"],
+                name=node["name"],
+                ip_address=ip_address,
+                port=514,
+                connected_to_switch=config.switch_name,
+                console_port=node.get("console"),
+                console_host=node.get("console_host") or self.gns3_server_ip,
+            )
+            return snitch_info, errors, reused
+            
+        except Exception as e:
+            error_msg = f"Failed to setup {config.name_suffix}: {e}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            return None, errors, reused
+
     async def setup_collectors(
         self,
         student_name: str,
         collectors: list[CollectorConfig],
     ) -> tuple[list[SnitchNodeInfo], list[str], bool]:
-        """Deploy and configure syslog collector nodes.
+        """Deploy and configure syslog collector nodes concurrently.
         
         Returns (snitch_nodes, errors, reused_existing).
         """
         template_id = self._find_template_id()
+        
+        # Setup all collectors in parallel
+        tasks = [
+            self._setup_single_collector(student_name, config, template_id)
+            for config in collectors
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
         snitch_nodes: list[SnitchNodeInfo] = []
         errors: list[str] = []
         any_reused = False
         
-        for config in collectors:
-            try:
-                # Create or reuse collector node
-                node, reused = self._create_collector_node(student_name, config, template_id)
+        for result in results:
+            if isinstance(result, Exception):
+                errors.append(str(result))
+            else:
+                snitch_info, collector_errors, reused = result
+                errors.extend(collector_errors)
                 if reused:
                     any_reused = True
-                
-                # Connect to switch (skip if already connected)
-                if not reused:
-                    self._connect_to_switch(node, config.switch_name)
-                
-                # Refresh node data to get console info
-                node = self.client.get_node(self.project_id, node["node_id"])
-                
-                # Start the node
-                self.client.start_node(self.project_id, node["node_id"])
-                
-                # Wait for boot
-                await asyncio.sleep(3)
-                
-                # Get IP address (via DHCP or already assigned)
-                ip_address = await self._get_node_ip_address(node)
-                
-                if not ip_address:
-                    error_msg = f"Failed to obtain IP for {config.name_suffix} - ensure DHCP server is running or assign static IP"
-                    logger.error(error_msg)
-                    errors.append(error_msg)
-                    continue
-                
-                # Ensure syslog-ng is running on the collector
-                syslog_running = await self._ensure_syslog_running(node)
-                if not syslog_running:
-                    error_msg = f"Warning: syslog-ng may not be running on {config.name_suffix}"
-                    logger.warning(error_msg)
-                    errors.append(error_msg)
-                    # Continue anyway - it might still work
-                
-                snitch_nodes.append(SnitchNodeInfo(
-                    node_id=node["node_id"],
-                    name=node["name"],
-                    ip_address=ip_address,
-                    port=514,
-                    connected_to_switch=config.switch_name,
-                    console_port=node.get("console"),
-                    console_host=node.get("console_host") or self.gns3_server_ip,
-                ))
-                
-            except Exception as e:
-                error_msg = f"Failed to setup {config.name_suffix}: {e}"
-                logger.error(error_msg)
-                errors.append(error_msg)
+                if snitch_info:
+                    snitch_nodes.append(snitch_info)
         
         return snitch_nodes, errors, any_reused
 
@@ -439,50 +470,72 @@ class LogCollector:
         self,
         snitch_nodes: list[SnitchNodeInfo],
     ) -> tuple[list[str], list[str], list[str]]:
-        """Inject PROMPT_COMMAND into all eligible nodes.
+        """Inject PROMPT_COMMAND into all eligible nodes concurrently.
         
         Returns (injected_nodes, skipped_nodes, errors).
         """
         eligible_nodes, skipped = self._get_eligible_nodes()
+        
+        # Semaphore to limit concurrent connections
+        semaphore = asyncio.Semaphore(8)
+        
+        async def inject_single_node(node: MutableMapping[str, Any]) -> tuple[str | None, str | None]:
+            """Inject into a single node. Returns (node_name, error) or (node_name, None) on success."""
+            name = node.get("name", "Unknown")
+            
+            async with semaphore:
+                try:
+                    console_target = resolve_console_target(node, self.gns3_server_ip)
+                    if not console_target:
+                        return None, f"{name} (no console)"
+                    
+                    host, port = console_target
+                    collector_ip = self._determine_collector_ip(node, snitch_nodes)
+                    
+                    # Build the PROMPT_COMMAND
+                    prompt_cmd = f"export PROMPT_COMMAND='history -a >(tee -a ~/.bash_history | logger -n {collector_ip} -P 514 -t \"Student-CMD\")'"
+                    
+                    settings = TelnetSettings(host=host, port=port)
+                    
+                    async with TelnetConsole(settings) as console:
+                        # Wait briefly for connection
+                        await asyncio.sleep(0.5)
+                        await console.read(timeout=1.0)  # Clear buffer
+                        
+                        # Send the command
+                        await console.run_command(prompt_cmd, read_duration=2.0)
+                        
+                        # Also add to bashrc for persistence
+                        bashrc_cmd = f"echo \"{prompt_cmd}\" >> ~/.bashrc"
+                        await console.run_command(bashrc_cmd, read_duration=2.0)
+                        
+                        logger.info(f"Injected PROMPT_COMMAND into {name} -> {collector_ip}")
+                        return name, None
+                        
+                except Exception as e:
+                    error_msg = f"Failed to inject into {name}: {e}"
+                    logger.error(error_msg)
+                    return None, error_msg
+        
+        # Run all injections concurrently
+        tasks = [inject_single_node(node) for node in eligible_nodes]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
         injected: list[str] = []
         errors: list[str] = []
         
-        for node in eligible_nodes:
-            name = node.get("name", "Unknown")
-            
-            try:
-                console_target = resolve_console_target(node, self.gns3_server_ip)
-                if not console_target:
-                    skipped.append(f"{name} (no console)")
-                    continue
-                
-                host, port = console_target
-                collector_ip = self._determine_collector_ip(node, snitch_nodes)
-                
-                # Build the PROMPT_COMMAND
-                prompt_cmd = f"export PROMPT_COMMAND='history -a >(tee -a ~/.bash_history | logger -n {collector_ip} -P 514 -t \"Student-CMD\")'"
-                
-                settings = TelnetSettings(host=host, port=port)
-                
-                async with TelnetConsole(settings) as console:
-                    # Wait briefly for connection
-                    await asyncio.sleep(0.5)
-                    await console.read(timeout=1.0)  # Clear buffer
-                    
-                    # Send the command
-                    output = await console.run_command(prompt_cmd, read_duration=2.0)
-                    
-                    # Also add to bashrc for persistence
-                    bashrc_cmd = f"echo \"{prompt_cmd}\" >> ~/.bashrc"
-                    await console.run_command(bashrc_cmd, read_duration=2.0)
-                    
-                    injected.append(name)
-                    logger.info(f"Injected PROMPT_COMMAND into {name} -> {collector_ip}")
-                    
-            except Exception as e:
-                error_msg = f"Failed to inject into {name}: {e}"
-                logger.error(error_msg)
-                errors.append(error_msg)
+        for result in results:
+            if isinstance(result, Exception):
+                errors.append(str(result))
+            else:
+                node_name, error = result
+                if node_name:
+                    injected.append(node_name)
+                if error:
+                    if "(no console)" in error:
+                        skipped.append(error)
+                    else:
+                        errors.append(error)
         
         return injected, skipped, errors
 
@@ -625,34 +678,49 @@ async def retrieve_all_logs(
     gns3_server_ip: str,
     snitch_nodes: list[SnitchNodeInfo],
 ) -> tuple[dict[str, str], list[str]]:
-    """Retrieve logs from all snitch nodes.
+    """Retrieve logs from all snitch nodes concurrently.
     
     Returns tuple of (logs_dict, errors).
     logs_dict maps collector type (e.g., 'it', 'ot') to log content.
     errors contains any retrieval errors that occurred.
     """
     collector = LogCollector(client, project_id, gns3_server_ip)
-    logs: dict[str, str] = {}
-    errors: list[str] = []
     
-    for snitch in snitch_nodes:
+    async def retrieve_single(snitch: SnitchNodeInfo) -> tuple[str, str, str | None]:
+        """Retrieve logs from a single snitch. Returns (collector_type, logs, error)."""
         collector_type = "it" if "IT" in snitch.name.upper() else "ot" if "OT" in snitch.name.upper() else snitch.name.lower()
         
         try:
             log_content = await collector.retrieve_logs(snitch)
-            logs[collector_type] = log_content
             
             # Log empty results as a warning
             if not log_content or not log_content.strip():
                 warning = f"{snitch.name}: Log file is empty - commands may not be reaching the collector"
                 logger.warning(warning)
-                errors.append(warning)
+                return collector_type, "", warning
+            
+            return collector_type, log_content, None
                 
         except Exception as e:
             error_msg = f"Failed to retrieve logs from {snitch.name}: {e}"
             logger.error(error_msg)
-            errors.append(error_msg)
-            logs[collector_type] = ""  # Empty string instead of error message in logs
+            return collector_type, "", error_msg
+    
+    # Retrieve logs from all collectors in parallel
+    tasks = [retrieve_single(snitch) for snitch in snitch_nodes]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    logs: dict[str, str] = {}
+    errors: list[str] = []
+    
+    for result in results:
+        if isinstance(result, Exception):
+            errors.append(str(result))
+        else:
+            collector_type, log_content, error = result
+            logs[collector_type] = log_content
+            if error:
+                errors.append(error)
     
     return logs, errors
 
