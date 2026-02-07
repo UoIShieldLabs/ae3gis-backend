@@ -65,20 +65,69 @@ class TelnetConsole:
             return ""
         return chunk or ""
 
-    async def read_for(self, duration: float, *, size: int = 1024, poll_interval: float = 0.5) -> str:
+    async def read_for(
+        self,
+        duration: float,
+        *,
+        size: int = 1024,
+        poll_interval: float = 0.5,
+        early_return_prompts: tuple[str, ...] | None = None,
+    ) -> str:
+        """Read output for a specified duration.
+        
+        Args:
+            duration: Maximum time to read for.
+            size: Buffer size for each read.
+            poll_interval: Time between read attempts.
+            early_return_prompts: If provided, return early when output ends with
+                any of these strings (e.g., ('# ', '$ ', '> ')). This allows
+                commands to return immediately when the shell prompt appears.
+        
+        Returns:
+            Collected output.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + duration
         chunks: list[str] = []
+        
         while loop.time() < deadline:
             remaining = deadline - loop.time()
             chunk = await self.read(size=size, timeout=min(poll_interval, max(remaining, 0.0)))
             if chunk:
                 chunks.append(chunk)
+                
+                # Check for early return if prompts specified
+                if early_return_prompts:
+                    output = "".join(chunks)
+                    # Check if output ends with any prompt pattern
+                    for prompt in early_return_prompts:
+                        if output.rstrip().endswith(prompt.rstrip()):
+                            return output
+        
         return "".join(chunks)
 
-    async def run_command(self, command: str, *, read_duration: float = 5.0) -> str:
+    async def run_command(
+        self,
+        command: str,
+        *,
+        read_duration: float = 5.0,
+        early_return: bool = False,
+    ) -> str:
+        """Run a command and read output.
+        
+        Args:
+            command: Command to execute.
+            read_duration: Maximum time to wait for output.
+            early_return: If True, return early when shell prompt is detected.
+        
+        Returns:
+            Command output.
+        """
         await self.send(command)
-        return await self.read_for(read_duration)
+        
+        # Common shell prompts for early return detection
+        prompts = ("# ", "$ ", "> ", "/ # ") if early_return else None
+        return await self.read_for(read_duration, early_return_prompts=prompts)
 
     async def run_command_with_status(
         self,

@@ -1,8 +1,9 @@
-"""Routes for managing and deploying topologies (network infrastructure definitions)."""
+"""Routes for managing and deploying scenarios."""
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 from typing import Any, MutableMapping
 
 import requests
@@ -12,103 +13,101 @@ from core.config_store import ConfigStore
 from core.gns3_client import GNS3Client, GNS3APIError
 from core.nodes import find_node_by_name, resolve_console_target
 from core.scenario_builder import ScenarioBuilder
-from core.topology_store import TopologyNotFoundError, TopologyRepository
+from core.scenario_store import ScenarioNotFoundError, ScenarioRepository
 from core.script_pusher import ScriptPusher, ScriptSpec
-from models.topology_types import (
-    TopologyCreateRequest,
-    TopologyDefinition,
-    TopologyDeployRequest,
-    TopologyDeployResponse,
-    TopologyDetail,
-    TopologySummary,
-    TopologyUpdateRequest,
+from models.scenario_types import (
+    ScenarioCreateRequest,
+    ScenarioDefinition,
+    ScenarioDeployRequest,
+    ScenarioDeployResponse,
+    ScenarioDetail,
+    ScenarioSummary,
+    ScenarioUpdateRequest,
     ScriptExecutionSummary,
     DeleteNodesRequest,
     DeleteNodesResponse,
-    DeployedNodeInfo,
-    DeployedNodesResponse,
 )
 from models import APISettings
 
-from ..dependencies import get_topology_repository, get_script_pusher, get_settings
+from ..dependencies import get_scenario_repository, get_script_pusher, get_settings
 
-router = APIRouter(prefix="/topologies", tags=["topologies"])
+router = APIRouter(prefix="/scenarios", tags=["scenarios"])
 
 
 # -----------------------------------------------------------------------------
-# Topology CRUD Endpoints
+# Scenario CRUD Endpoints
 # -----------------------------------------------------------------------------
 
 
-@router.post("/", response_model=TopologyDetail, status_code=status.HTTP_201_CREATED)
-def create_topology(
-    payload: TopologyCreateRequest,
-    repository: TopologyRepository = Depends(get_topology_repository),
-) -> TopologyDetail:
-    """Create a new topology (instructor use)."""
+@router.post("/", response_model=ScenarioDetail, status_code=status.HTTP_201_CREATED)
+def create_scenario(
+    payload: ScenarioCreateRequest,
+    repository: ScenarioRepository = Depends(get_scenario_repository),
+) -> ScenarioDetail:
+    """Create a new scenario (instructor use)."""
     data = {
         "name": payload.name,
         "description": payload.description,
         "definition": payload.definition.model_dump(),
     }
     record = repository.create(data)
-    return TopologyDetail.model_validate(record)
+    return ScenarioDetail.model_validate(record)
 
 
-@router.get("/", response_model=list[TopologySummary])
-def list_topologies(
-    repository: TopologyRepository = Depends(get_topology_repository),
-) -> list[TopologySummary]:
-    """List all stored topologies."""
+@router.get("/", response_model=list[ScenarioSummary])
+def list_scenarios(
+    repository: ScenarioRepository = Depends(get_scenario_repository),
+) -> list[ScenarioSummary]:
+    """List all stored scenarios."""
     records = repository.list_all()
-    return [TopologySummary.model_validate(record) for record in records]
+    return [ScenarioSummary.model_validate(record) for record in records]
 
 
-@router.get("/{topology_id}", response_model=TopologyDetail)
-def get_topology(
-    topology_id: str,
-    repository: TopologyRepository = Depends(get_topology_repository),
-) -> TopologyDetail:
-    """Retrieve a topology by ID."""
+@router.get("/{scenario_id}", response_model=ScenarioDetail)
+def get_scenario(
+    scenario_id: str,
+    repository: ScenarioRepository = Depends(get_scenario_repository),
+) -> ScenarioDetail:
+    """Retrieve a scenario by ID."""
     try:
-        record = repository.get(topology_id)
-    except TopologyNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Topology not found") from exc
-    return TopologyDetail.model_validate(record)
+        record = repository.get(scenario_id)
+    except ScenarioNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Scenario not found") from exc
+    return ScenarioDetail.model_validate(record)
 
 
-@router.patch("/{topology_id}", response_model=TopologyDetail)
-def update_topology(
-    topology_id: str,
-    payload: TopologyUpdateRequest,
-    repository: TopologyRepository = Depends(get_topology_repository),
-) -> TopologyDetail:
-    """Update a topology's metadata or definition (instructor use)."""
+@router.patch("/{scenario_id}", response_model=ScenarioDetail)
+def update_scenario(
+    scenario_id: str,
+    payload: ScenarioUpdateRequest,
+    repository: ScenarioRepository = Depends(get_scenario_repository),
+) -> ScenarioDetail:
+    """Update a scenario's metadata or definition (instructor use)."""
     updates = payload.to_update_dict()
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
     try:
-        record = repository.update(topology_id, updates)
-    except TopologyNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Topology not found") from exc
-    return TopologyDetail.model_validate(record)
+        record = repository.update(scenario_id, updates)
+    except ScenarioNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Scenario not found") from exc
+    return ScenarioDetail.model_validate(record)
 
 
-@router.delete("/{topology_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_topology(
-    topology_id: str,
-    repository: TopologyRepository = Depends(get_topology_repository),
+@router.delete("/{scenario_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_scenario(
+    scenario_id: str,
+    repository: ScenarioRepository = Depends(get_scenario_repository),
 ) -> Response:
-    """Delete a topology by ID (instructor use)."""
+    """Delete a scenario by ID (instructor use)."""
     try:
-        repository.delete(topology_id)
-    except TopologyNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Topology not found") from exc
+        repository.delete(scenario_id)
+    except ScenarioNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Scenario not found") from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # -----------------------------------------------------------------------------
-# Topology Deployment Endpoint
+# Scenario Deployment Endpoint
 # -----------------------------------------------------------------------------
 
 # Concurrency limit for parallel operations
@@ -154,7 +153,7 @@ async def _execute_single_script(
         spec = ScriptSpec(
             remote_path=script.remote_path,
             content=script.content,
-            run_after_upload=script.run_after_upload,
+            run_after_upload=True,
             executable=True,
             overwrite=True,
             run_timeout=script.timeout,
@@ -163,17 +162,9 @@ async def _execute_single_script(
         
         try:
             push_result = await pusher.push(node_name, host, port, spec)
-            
-            # Success depends on whether we're running or just uploading
-            if script.run_after_upload:
-                # Both upload and execution must succeed
-                success = push_result.upload.success and (
-                    push_result.execution.success if push_result.execution else False
-                )
-            else:
-                # Only upload needs to succeed (no execution expected)
-                success = push_result.upload.success
-            
+            success = push_result.upload.success and (
+                push_result.execution.success if push_result.execution else False
+            )
             error = None
             if not push_result.upload.success:
                 error = push_result.upload.error or push_result.upload.reason
@@ -200,7 +191,7 @@ async def _execute_single_script(
 
 
 async def _execute_embedded_scripts(
-    definition: TopologyDefinition,
+    definition: ScenarioDefinition,
     config_record: MutableMapping[str, Any],
     gns3_server_ip: str,
     pusher: ScriptPusher,
@@ -270,62 +261,62 @@ async def _execute_embedded_scripts(
     return results
 
 
-@router.post("/{topology_id}/deploy", response_model=TopologyDeployResponse)
-async def deploy_topology(
-    topology_id: str,
-    payload: TopologyDeployRequest,
-    repository: TopologyRepository = Depends(get_topology_repository),
+@router.post("/{scenario_id}/deploy", response_model=ScenarioDeployResponse)
+async def deploy_scenario(
+    scenario_id: str,
+    payload: ScenarioDeployRequest,
+    repository: ScenarioRepository = Depends(get_scenario_repository),
     pusher: ScriptPusher = Depends(get_script_pusher),
     settings: APISettings = Depends(get_settings),
-) -> TopologyDeployResponse:
+) -> ScenarioDeployResponse:
     """
-    Deploy a stored topology to a GNS3 server.
+    Deploy a stored scenario to a student's GNS3 server.
     
-    If payload.definition is provided, it overrides the stored topology definition.
+    If payload.definition is provided, it overrides the stored scenario definition.
     
     This endpoint:
-    1. Loads the topology definition (or uses provided definition)
-    2. Creates all nodes and links in the GNS3 project
+    1. Loads the scenario definition (or uses provided definition)
+    2. Creates all nodes and links in the student's GNS3 project
     3. Starts all nodes
     4. Executes embedded scripts in priority order (with delays between groups)
     """
-    # Load topology
+    # Load scenario
     try:
-        record = repository.get(topology_id)
-    except TopologyNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Topology not found") from exc
+        record = repository.get(scenario_id)
+    except ScenarioNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Scenario not found") from exc
     
     # Use provided definition or fall back to stored one
     if payload.definition:
         definition = payload.definition
     else:
-        definition = TopologyDefinition.model_validate(record["definition"])
-    topology_name = record["name"]
+        definition = ScenarioDefinition.model_validate(record["definition"])
+    scenario_name = record["name"]
     
-    return await _deploy_topology_impl(
+    return await _deploy_scenario_impl(
         definition=definition,
         payload=payload,
         pusher=pusher,
         settings=settings,
-        topology_id=topology_id,
-        topology_name=topology_name,
+        scenario_id=scenario_id,
+        scenario_name=scenario_name,
     )
 
 
-@router.post("/deploy", response_model=TopologyDeployResponse)
-async def deploy_adhoc_topology(
-    payload: TopologyDeployRequest,
+@router.post("/deploy", response_model=ScenarioDeployResponse)
+async def deploy_adhoc_scenario(
+    payload: ScenarioDeployRequest,
     pusher: ScriptPusher = Depends(get_script_pusher),
     settings: APISettings = Depends(get_settings),
-) -> TopologyDeployResponse:
+) -> ScenarioDeployResponse:
     """
-    Deploy an ad-hoc topology directly without storing it.
+    Deploy an ad-hoc scenario directly without storing it.
     
     Requires payload.definition to be provided.
     
     This endpoint:
-    1. Uses the provided topology definition
-    2. Creates all nodes and links in the GNS3 project
+    1. Uses the provided scenario definition
+    2. Creates all nodes and links in the student's GNS3 project
     3. Starts all nodes
     4. Executes embedded scripts in priority order (with delays between groups)
     """
@@ -335,37 +326,37 @@ async def deploy_adhoc_topology(
             detail="definition is required for ad-hoc deployment"
         )
     
-    return await _deploy_topology_impl(
+    return await _deploy_scenario_impl(
         definition=payload.definition,
         payload=payload,
         pusher=pusher,
         settings=settings,
-        topology_id=None,
-        topology_name=None,
+        scenario_id=None,
+        scenario_name=None,
     )
 
 
-async def _deploy_topology_impl(
-    definition: TopologyDefinition,
-    payload: TopologyDeployRequest,
+async def _deploy_scenario_impl(
+    definition: ScenarioDefinition,
+    payload: ScenarioDeployRequest,
     pusher: ScriptPusher,
     settings: APISettings,
-    topology_id: str | None,
-    topology_name: str | None,
-) -> TopologyDeployResponse:
-    """Shared implementation for deploying a topology."""
-    # Build base URL from GNS3 server
+    scenario_id: str | None,
+    scenario_name: str | None,
+) -> ScenarioDeployResponse:
+    """Shared implementation for deploying a scenario."""
+    # Build base URL from student's GNS3 server
     base_url = f"http://{payload.gns3_server_ip}:{payload.gns3_server_port}"
     
-    # Prepare topology dict for builder (convert to legacy format)
+    # Prepare scenario dict for builder (convert to legacy format)
     project_name = payload.project_name or definition.project_name
     if not project_name and not definition.project_id:
         raise HTTPException(
             status_code=400, 
-            detail="Either project_name must be provided or defined in topology"
+            detail="Either project_name must be provided or defined in scenario"
         )
     
-    topology_dict: dict[str, Any] = {
+    scenario_dict: dict[str, Any] = {
         "gns3_server_ip": payload.gns3_server_ip,
         "project_name": project_name,
         "project_id": definition.project_id,
@@ -412,10 +403,10 @@ async def _deploy_topology_impl(
     warnings: list[str] = []
     
     try:
-        # Build topology (create nodes and links)
+        # Build scenario (create nodes and links)
         result = await asyncio.to_thread(
             builder.build, 
-            topology_dict, 
+            scenario_dict, 
             start_nodes=payload.start_nodes
         )
         warnings.extend(result.warnings)
@@ -451,9 +442,9 @@ async def _deploy_topology_impl(
     
     overall_success = len(errors) == 0 and len(result.nodes_created) > 0
     
-    return TopologyDeployResponse(
-        topology_id=topology_id,
-        topology_name=topology_name,
+    return ScenarioDeployResponse(
+        scenario_id=scenario_id,
+        scenario_name=scenario_name,
         project_id=result.project_id,
         project_name=result.project_name,
         gns3_server_ip=payload.gns3_server_ip,
@@ -471,131 +462,6 @@ async def _deploy_topology_impl(
 # -----------------------------------------------------------------------------
 
 
-def _infer_layer(node_name: str) -> str:
-    """
-    Infer the layer/zone of a node based on its name.
-    
-    Common patterns:
-    - IT: workstation, client, user, admin, corporate
-    - DMZ: dmz, web, proxy, gateway, firewall
-    - OT: plc, hmi, scada, rtu, ics, historian, engineering
-    - Field: sensor, actuator, motor, valve, pump, field
-    """
-    name_lower = node_name.lower()
-    
-    # OT layer keywords
-    ot_keywords = ['plc', 'hmi', 'scada', 'rtu', 'ics', 'historian', 'engineering', 
-                   'dcs', 'mtconnect', 'opcua', 'modbus', 'controller']
-    for kw in ot_keywords:
-        if kw in name_lower:
-            return "OT"
-    
-    # Field layer keywords
-    field_keywords = ['sensor', 'actuator', 'motor', 'valve', 'pump', 'field',
-                      'io', 'remote', 'terminal']
-    for kw in field_keywords:
-        if kw in name_lower:
-            return "Field"
-    
-    # DMZ layer keywords
-    dmz_keywords = ['dmz', 'web', 'proxy', 'gateway', 'firewall', 'fw', 'router',
-                    'switch', 'openvswitch', 'ovs', 'nat', 'vpn']
-    for kw in dmz_keywords:
-        if kw in name_lower:
-            return "DMZ"
-    
-    # IT layer keywords
-    it_keywords = ['workstation', 'client', 'user', 'admin', 'corporate', 'office',
-                   'desktop', 'laptop', 'pc', 'ubuntu', 'windows', 'kali', 'attacker',
-                   'server', 'dhcp', 'dns', 'ad', 'domain']
-    for kw in it_keywords:
-        if kw in name_lower:
-            return "IT"
-    
-    return "Unknown"
-
-
-@router.get("/projects/{project_name}/nodes", response_model=DeployedNodesResponse)
-async def list_project_nodes(
-    project_name: str,
-    server_ip: str,
-    server_port: int = 80,
-    username: str = "gns3",
-    password: str = "gns3",
-) -> DeployedNodesResponse:
-    """
-    List all deployed nodes in a GNS3 project, grouped by layer.
-    
-    This is useful for:
-    - Selecting target nodes for script execution
-    - Understanding the current topology state
-    - Displaying node information in the frontend
-    
-    Nodes are automatically classified into layers (IT, DMZ, OT, Field, Unknown)
-    based on their names.
-    """
-    base_url = f"http://{server_ip}:{server_port}"
-    
-    session = requests.Session()
-    session.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
-    session.auth = (username, password)
-    
-    client = GNS3Client(base_url=base_url, session=session)
-    
-    try:
-        # Find project ID
-        project_id = await asyncio.to_thread(client.find_project_id, project_name)
-        
-        # Get all nodes
-        raw_nodes = await asyncio.to_thread(client.list_nodes, project_id)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except GNS3APIError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to connect to GNS3 server: {exc}") from exc
-    finally:
-        session.close()
-    
-    # Convert to DeployedNodeInfo
-    nodes: list[DeployedNodeInfo] = []
-    nodes_by_layer: dict[str, list[DeployedNodeInfo]] = {
-        "IT": [],
-        "DMZ": [],
-        "OT": [],
-        "Field": [],
-        "Unknown": [],
-    }
-    
-    for raw_node in raw_nodes:
-        node_name = raw_node.get("name", "")
-        layer = _infer_layer(node_name)
-        
-        node_info = DeployedNodeInfo(
-            node_id=raw_node.get("node_id", ""),
-            name=node_name,
-            status=raw_node.get("status", "unknown"),
-            console=raw_node.get("console"),
-            console_type=raw_node.get("console_type"),
-            console_host=raw_node.get("console_host") or server_ip,
-            node_type=raw_node.get("node_type"),
-            template_id=raw_node.get("template_id"),
-            layer=layer,
-            x=raw_node.get("x", 0),
-            y=raw_node.get("y", 0),
-        )
-        nodes.append(node_info)
-        nodes_by_layer[layer].append(node_info)
-    
-    return DeployedNodesResponse(
-        project_id=project_id,
-        project_name=project_name,
-        total_nodes=len(nodes),
-        nodes=nodes,
-        nodes_by_layer=nodes_by_layer,
-    )
-
-
 @router.delete("/projects/{project_id}/nodes", response_model=DeleteNodesResponse)
 async def delete_project_nodes(
     project_id: str,
@@ -605,7 +471,7 @@ async def delete_project_nodes(
     Delete all nodes and links from a GNS3 project by project ID.
     
     This stops all nodes first, then deletes all links, then deletes all nodes.
-    Useful for cleaning up a project before redeploying a topology.
+    Useful for cleaning up a project before redeploying a scenario.
     """
     base_url = f"http://{payload.gns3_server_ip}:{payload.gns3_server_port}"
     
@@ -645,7 +511,7 @@ async def delete_project_nodes_by_name(
     
     This looks up the project ID by name, then stops all nodes,
     deletes all links, and deletes all nodes.
-    Useful for cleaning up a project before redeploying a topology.
+    Useful for cleaning up a project before redeploying a scenario.
     """
     base_url = f"http://{payload.gns3_server_ip}:{payload.gns3_server_port}"
     
