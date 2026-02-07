@@ -143,6 +143,7 @@ async def _execute_on_node(
     server_ip: str,
     pusher: ScriptPusher,
     semaphore: asyncio.Semaphore,
+    run_after_upload: bool = True,
 ) -> NodeExecutionResult:
     """Execute a script on a single node."""
     async with semaphore:
@@ -168,7 +169,7 @@ async def _execute_on_node(
         spec = ScriptSpec(
             remote_path=storage_path,
             content=script_content,
-            run_after_upload=True,
+            run_after_upload=run_after_upload,
             executable=True,
             overwrite=True,
             run_timeout=timeout,
@@ -178,13 +179,21 @@ async def _execute_on_node(
         try:
             result = await pusher.push(node_name, host, console_port, spec)
             
-            success = result.upload.success
+            # Success depends on whether we're running or just uploading
+            if run_after_upload:
+                # Both upload and execution must succeed
+                success = result.upload.success and (
+                    result.execution.success if result.execution else False
+                )
+            else:
+                # Only upload needs to succeed (no execution expected)
+                success = result.upload.success
+            
             output = result.upload.output
             error = result.upload.error or result.upload.reason
             exit_code = None
             
             if result.execution:
-                success = success and result.execution.success
                 output = result.execution.output or output
                 if not result.execution.success:
                     error = result.execution.error
@@ -274,6 +283,7 @@ async def execute_script(
             server_ip=payload.gns3_server_ip,
             pusher=pusher,
             semaphore=semaphore,
+            run_after_upload=payload.run_after_upload,
         )
         for node_name in payload.target_nodes
     ]

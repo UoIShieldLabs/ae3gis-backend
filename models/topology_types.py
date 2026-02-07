@@ -24,6 +24,10 @@ class EmbeddedScript(BaseModel):
     )
     shell: str = Field(default="sh", description="Shell used to execute the script.")
     timeout: float = Field(default=30.0, ge=0.0, description="Execution timeout in seconds.")
+    run_after_upload: bool = Field(
+        default=True,
+        description="Whether to execute the script after uploading. Set to False to only upload without running."
+    )
 
 
 class LinkEndpoint(BaseModel):

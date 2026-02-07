@@ -40,6 +40,10 @@ class ScriptStep(BaseModel):
     )
     shell: str = Field(default="sh", description="Shell used to execute the script.")
     timeout: float = Field(default=30.0, ge=0.0, description="Execution timeout in seconds.")
+    run_after_upload: bool = Field(
+        default=True,
+        description="Whether to execute the script after uploading. Set to False to only upload without running (e.g., for config files, .st files, .py files)."
+    )
     description: str | None = Field(default=None, description="Optional description of what this script does.")
 
 
@@ -151,6 +155,10 @@ class ExecuteScriptRequest(BaseModel):
     storage_path: str = Field(default="/tmp/script.sh", description="Path to store the script on nodes.")
     shell: str = Field(default="sh", description="Shell to execute the script with.")
     timeout: float = Field(default=30.0, ge=0.0, description="Execution timeout in seconds.")
+    run_after_upload: bool = Field(
+        default=True,
+        description="Whether to execute the script after uploading. Set to False to only upload without running (e.g., config files)."
+    )
 
 
 class NodeExecutionResult(BaseModel):

@@ -154,7 +154,7 @@ async def _execute_single_script(
         spec = ScriptSpec(
             remote_path=script.remote_path,
             content=script.content,
-            run_after_upload=True,
+            run_after_upload=script.run_after_upload,
             executable=True,
             overwrite=True,
             run_timeout=script.timeout,
@@ -163,9 +163,17 @@ async def _execute_single_script(
         
         try:
             push_result = await pusher.push(node_name, host, port, spec)
-            success = push_result.upload.success and (
-                push_result.execution.success if push_result.execution else False
-            )
+            
+            # Success depends on whether we're running or just uploading
+            if script.run_after_upload:
+                # Both upload and execution must succeed
+                success = push_result.upload.success and (
+                    push_result.execution.success if push_result.execution else False
+                )
+            else:
+                # Only upload needs to succeed (no execution expected)
+                success = push_result.upload.success
+            
             error = None
             if not push_result.upload.success:
                 error = push_result.upload.error or push_result.upload.reason
