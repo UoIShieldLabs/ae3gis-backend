@@ -58,6 +58,7 @@ class ScenarioBuildResult:
     nodes_detail: list[MutableMapping[str, Any]]
     links_detail: list[MutableMapping[str, Any]]
     config_record: MutableMapping[str, Any]
+    warnings: list[str]
 
 
 class ScenarioBuilder:
@@ -114,7 +115,14 @@ class ScenarioBuilder:
             nodes_detail.append(self._client.get_node(project_id, node_id))
             if self._request_delay:
                 time.sleep(self._request_delay)
-        links_detail = list(self._client.list_project_links(project_id))
+        
+        # Graceful degradation: if listing links fails, continue with empty list
+        warnings: list[str] = []
+        links_detail: list[MutableMapping[str, Any]] = []
+        try:
+            links_detail = list(self._client.list_project_links(project_id))
+        except Exception as exc:
+            warnings.append(f"Failed to fetch links detail: {exc}")
 
         config_record = make_config_record(project_name, project_id, nodes_detail, links_detail)
 
@@ -126,6 +134,7 @@ class ScenarioBuilder:
             nodes_detail=nodes_detail,
             links_detail=links_detail,
             config_record=config_record,
+            warnings=warnings,
         )
 
     def _resolve_project(self, scenario: Mapping[str, Any]) -> tuple[str, str | None]:

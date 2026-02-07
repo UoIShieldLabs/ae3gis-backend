@@ -17,4 +17,5 @@ ip addr add "$IP_CIDR" dev "$IFACE" 2>/dev/null || true
 ip link set "$IFACE" up
 
 echo "Starting ISC DHCP on $IFACE with $IP_CIDR"
-exec /usr/sbin/dhcpd -4 -f -d -cf "$CONF" -lf "$LEASES" "$IFACE"
+# exec /usr/sbin/dhcpd -4 -f -d -cf "$CONF" -lf "$LEASES" "$IFACE"
+/usr/sbin/dhcpd -4 -cf "$CONF" -lf "$LEASES" "$IFACE"

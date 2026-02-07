@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 import requests
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
-from urllib.parse import urlparse
+from typing import Dict, List, Tuple
 
 from core.template_cache import TemplateCacheError, load_registry
 from models import APISettings
@@ -13,28 +12,15 @@ BUILD_URL = f"{API_BASE}/scenario/build"
 SCRIPTS_URL = f"{API_BASE}/scripts/push"
 
 PROJECT_NAME = "ae3gis-root-2"
-
-# Provide overrides for each GNS3 server you want to target. Leave fields blank to fall back to defaults
-# discovered from the FastAPI cache / settings.
-TARGET_GNS3_SERVERS: List[Dict[str, Any]] = [
-    {
-        # "label": "primary-lab",
-        # "ip": "10.193.80.120",
-        # "port": 3080,
-        # "username": "gns3",
-        # "password": "gns3",
-        # "base_url": "http://10.193.80.120:3080",
-    },
-]
 # ========= ================== =========
 
 
 # How many scenarios (tiles) to create and how they are laid out
-NUM_SCENARIOS = 9
-SCENARIOS_PER_ROW = 3             # how many tiles per row
+NUM_SCENARIOS = 32
+SCENARIOS_PER_ROW = 5             # how many tiles per row
 TILE_WIDTH = 900                  # px between scenarios horizontally
 TILE_HEIGHT = 500                 # px between scenarios vertically
-CANVAS_TOP_LEFT = (-500, -400)  # where the first scenario starts
+CANVAS_TOP_LEFT = (-1800, -1600)  # where the first scenario starts
 
 # Clients layout inside each scenario (tile)
 CLIENTS_PER_SCENARIO = 13
@@ -99,28 +85,14 @@ if PROJECT_NAME not in _projects_cache:
 PROJECT_ID = _projects_cache[PROJECT_NAME]
 
 _server_info = _registry.get("server") or {}
-DEFAULT_GNS3_BASE_URL = str(_server_info.get("base_url") or _settings.gns3_base_url).rstrip("/")
-DEFAULT_GNS3_SERVER_IP = str(_server_info.get("ip") or _settings.gns3_server_ip)
+GNS3_BASE_URL = str(_server_info.get("base_url") or _settings.gns3_base_url).rstrip("/")
+GNS3_SERVER_IP = str(_server_info.get("ip") or _settings.gns3_server_ip)
 
-if not DEFAULT_GNS3_BASE_URL:
+if not GNS3_BASE_URL:
     raise SystemExit(
         "Unable to determine GNS3 base URL from cache or settings. "
         "Set GNS3_BASE_URL in the environment or refresh the cache."
     )
-
-_parsed_default_url = urlparse(
-    DEFAULT_GNS3_BASE_URL if "://" in DEFAULT_GNS3_BASE_URL else f"http://{DEFAULT_GNS3_BASE_URL}"
-)
-DEFAULT_GNS3_SCHEME = _parsed_default_url.scheme or "http"
-DEFAULT_GNS3_HOST = _parsed_default_url.hostname or DEFAULT_GNS3_SERVER_IP
-DEFAULT_GNS3_PORT = _parsed_default_url.port
-DEFAULT_GNS3_PORT_IN_URL = _parsed_default_url.port is not None
-DEFAULT_GNS3_BASE_URL = (
-    f"{DEFAULT_GNS3_SCHEME}://{DEFAULT_GNS3_HOST}{f':{DEFAULT_GNS3_PORT}' if DEFAULT_GNS3_PORT_IN_URL else ''}"
-).rstrip("/")
-
-DEFAULT_GNS3_USERNAME = "gns3"
-DEFAULT_GNS3_PASSWORD = "gns3"
 
 REQUIRED_TEMPLATE_NAMES: Tuple[str, ...] = (
     "test-client:v0.2",
@@ -152,75 +124,6 @@ class Tile:
     row: int
     x: int
     y: int
-
-
-@dataclass
-class ServerConfig:
-    label: str
-    base_url: str
-    server_ip: str
-    username: str
-    password: str
-
-
-def _normalize_target_entry(entry: Dict[str, Any] | None, index: int) -> ServerConfig:
-    data = entry or {}
-
-    username = str(data.get("username") or DEFAULT_GNS3_USERNAME)
-    password = str(data.get("password") or DEFAULT_GNS3_PASSWORD)
-
-    raw_base_url = str(data.get("base_url") or "").strip()
-    raw_ip = str(data.get("ip") or "").strip()
-    raw_scheme = str(data.get("scheme") or "").strip()
-    raw_label = str(data.get("label") or data.get("name") or "").strip()
-    raw_port = data.get("port")
-
-    if raw_base_url:
-        parsed = urlparse(
-            raw_base_url if "://" in raw_base_url else f"{DEFAULT_GNS3_SCHEME}://{raw_base_url}"
-        )
-        scheme = parsed.scheme or raw_scheme or DEFAULT_GNS3_SCHEME
-        host = parsed.hostname or raw_ip or DEFAULT_GNS3_HOST
-        port = parsed.port if parsed.port is not None else None
-    else:
-        scheme = raw_scheme or DEFAULT_GNS3_SCHEME
-        host = raw_ip or DEFAULT_GNS3_HOST
-        port = None
-
-    if raw_port not in (None, ""):
-        try:
-            port = int(raw_port)
-        except (TypeError, ValueError) as exc:
-            raise SystemExit(f"Invalid port for target #{index}: {raw_port}") from exc
-    elif port is None and DEFAULT_GNS3_PORT_IN_URL:
-        port = DEFAULT_GNS3_PORT
-
-    if not host:
-        host = DEFAULT_GNS3_HOST
-
-    if port is not None:
-        base_url = f"{scheme}://{host}:{port}"
-    else:
-        base_url = f"{scheme}://{host}"
-
-    ip_value = raw_ip or host or DEFAULT_GNS3_SERVER_IP
-    label = raw_label or ip_value or f"target-{index}"
-
-    return ServerConfig(
-        label=label,
-        base_url=base_url.rstrip("/"),
-        server_ip=ip_value,
-        username=username,
-        password=password,
-    )
-
-
-def resolve_target_servers(raw_targets: List[Dict[str, Any]]) -> List[ServerConfig]:
-    entries = raw_targets or [{}]
-    configs: List[ServerConfig] = []
-    for idx, entry in enumerate(entries, start=1):
-        configs.append(_normalize_target_entry(entry, idx))
-    return configs
 
 
 def tile_for_index(idx: int) -> Tile:
@@ -297,23 +200,18 @@ def make_links(client_names: List[str], switch_name: str, dhcp_name: str, server
     return links
 
 
-def build_payload(
-    tile: Tile,
-    scenario_idx: int,
-    next_client_id: int,
-    server: ServerConfig,
-) -> Tuple[Dict, List[str], Dict[str, str], int]:
+def build_payload(tile: Tile, scenario_idx: int, next_client_id: int) -> Tuple[Dict, List[str], Dict[str, str], int]:
     client_nodes, client_names, after_id = make_clients(tile, next_client_id)
     special_nodes, special_names = make_special_nodes(tile, scenario_idx)
     links = make_links(client_names, special_names["switch"], special_names["dhcp"], special_names["server"])
 
     payload = {
-        "base_url": server.base_url,
+        "base_url": GNS3_BASE_URL,
         "start_nodes": True,
-        "username": server.username,
-        "password": server.password,
+        "username": "gns3",
+        "password": "gns3",
         "scenario": {
-            "gns3_server_ip": server.server_ip,
+            "gns3_server_ip": GNS3_SERVER_IP,
             "project_name": PROJECT_NAME,
             "project_id": PROJECT_ID,
             "templates": TEMPLATES,  # do not repeat IDs elsewhere
@@ -330,14 +228,7 @@ def post_json(url: str, data: Dict) -> Dict:
     return r.json() if r.headers.get("content-type", "").startswith("application/json") else {"text": r.text}
 
 
-def push_script(
-	node_name: str,
-	local_path: str,
-	remote_path: str,
-	server: ServerConfig,
-	shell: str = "sh",
-	timeout: int = 10,
-) -> None:
+def push_script(node_name: str, local_path: str, remote_path: str, shell: str = "sh", timeout: int = 10) -> None:
     payload = {
         "scripts": [{
             "node_name": node_name,
@@ -349,22 +240,15 @@ def push_script(
             "run_timeout": timeout,
             "shell": shell
         }],
-        "gns3_server_ip": server.server_ip,
+        "gns3_server_ip": GNS3_BASE_URL,
         "concurrency": SCRIPTS_CONCURRENCY,
-        "username": server.username,
-        "password": server.password,
+        "username": "gns3",
+        "password": "gns3",
     }
     post_json(SCRIPTS_URL, payload)
 
 
-def push_batch_scripts(
-	node_names: List[str],
-	local_path: str,
-	remote_path: str,
-	server: ServerConfig,
-	shell: str = "sh",
-	timeout: int = 10,
-) -> None:
+def push_batch_scripts(node_names: List[str], local_path: str, remote_path: str, shell: str = "sh", timeout: int = 10) -> None:
     scripts = [{
         "node_name": n,
         "local_path": local_path,
@@ -377,43 +261,32 @@ def push_batch_scripts(
     } for n in node_names]
     payload = {
         "scripts": scripts,
-        "gns3_server_ip": server.server_ip,
+        "gns3_server_ip": GNS3_BASE_URL,
         "concurrency": SCRIPTS_CONCURRENCY,
-        "username": server.username,
-        "password": server.password,
+        "username": "gns3",
+        "password": "gns3",
     }
     post_json(SCRIPTS_URL, payload)
 
 
 def main():
     next_client_id = START_AT
-    servers = resolve_target_servers(TARGET_GNS3_SERVERS)
 
     with requests.Session() as _:
-        for server in servers:
-            print(f"\n=== Targeting GNS3 server: {server.label} ({server.base_url}) ===")
-            for scenario_idx in range(NUM_SCENARIOS):
-                tile = tile_for_index(scenario_idx)
-                build_body, client_names, special_names, next_client_id = build_payload(
-                    tile,
-                    scenario_idx,
-                    next_client_id,
-                    server,
-                )
+        for scenario_idx in range(NUM_SCENARIOS):
+            tile = tile_for_index(scenario_idx)
+            build_body, client_names, special_names, next_client_id = build_payload(tile, scenario_idx, next_client_id)
 
-                print(
-                    f"Building scenario {scenario_idx + 1}/{NUM_SCENARIOS}"
-                    f" at tile ({tile.col},{tile.row}) origin=({tile.x},{tile.y})"
-                )
-                post_json(BUILD_URL, build_body)
+            print(f"Building scenario {scenario_idx + 1}/{NUM_SCENARIOS} at tile ({tile.col},{tile.row}) origin=({tile.x},{tile.y})")
+            post_json(BUILD_URL, build_body)
 
-                # Sequential script pushes (order matters)
-                print("  Pushing server script...")
-                push_script(special_names["server"], SERVER_SCRIPT, "/usr/local/bin/run_server.sh", server)
-                print("  Pushing DHCP script...")
-                push_script(special_names["dhcp"], DHCP_SCRIPT, "/usr/local/bin/run_dhcp.sh", server)
-                print("  Pushing client scripts...")
-                push_batch_scripts(client_names, CLIENT_SCRIPT, "/usr/local/bin/run_http2.sh", server)
+            # Sequential script pushes (order matters)
+            print("  Pushing server script...")
+            push_script(special_names["server"], SERVER_SCRIPT, "/usr/local/bin/run_server.sh")
+            print("  Pushing DHCP script...")
+            push_script(special_names["dhcp"], DHCP_SCRIPT, "/usr/local/bin/run_dhcp.sh")
+            print("  Pushing client scripts...")
+            push_batch_scripts(client_names, CLIENT_SCRIPT, "/usr/local/bin/run_http2.sh")
 
     print("Done.")
 

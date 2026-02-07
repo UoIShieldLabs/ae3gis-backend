@@ -1,48 +1,41 @@
-# AE3GIS GNS3 API — Quick Start
+# GNS3 Scenario Service API
+
+A FastAPI service for automating GNS3 network topology creation, script management, and execution.
 
 ## Prerequisites
+
 - Python 3.10+
-- The IP and Port of a running GNS3 server
+- [uv](https://docs.astral.sh/uv/) package manager
+- A running GNS3 server
 
-## 1) Configure
-Copy the example env file and edit values to match your setup:
+## Setup
+
 ```bash
+# Clone and enter the project
+cd ae3gis-gns3-api
+
+# Install dependencies
+uv sync
+
+# Configure environment
 cp .env.example .env
-# then open .env and set your GNS3 server URL
-````
+# Edit .env with your GNS3 server details
+```
 
-## 2) Install (create venv + pip install)
-
-**macOS / Linux**
+## Run
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv run uvicorn api.main:app --reload
 ```
 
-**Windows (PowerShell)**
+Server runs at `http://127.0.0.1:8000`
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate
-pip install -r requirements.txt
-```
+## API Documentation
 
-## 3) Launch the API
+- **Swagger UI**: http://127.0.0.1:8000/docs
+- **ReDoc**: http://127.0.0.1:8000/redoc
+ -->
 
-```bash
-uvicorn api.main:app --reload
-```
-
-The server will print the URL (default: `http://127.0.0.1:8000`).
-
-## 4) Read the Docs
-
-* Interactive docs (Swagger): `http://127.0.0.1:8000/docs`
-* ReDoc: `http://127.0.0.1:8000/redoc`
-* Health check: `GET /health` → `{"status":"ok"}`
-
-> Make sure you configure `.env`, install deps, run the server, then use the docs to interact.
+<!-- See [API_REFERENCE.md](API_REFERENCE.md) for complete documentation. -->
 
 

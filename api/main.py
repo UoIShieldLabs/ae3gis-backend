@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import FastAPI
 
 from .dependencies import get_settings
 from .routers import dhcp as dhcp_router
-from .routers import scenario as scenario_router
-from .routers import scripts as scripts_router
+from .routers import gns3 as gns3_router
+from .routers import instructor as instructor_router
+from .routers import logging as logging_router
 from .routers import topologies as topologies_router
-from core.template_cache import TemplateCacheError, refresh_templates_cache
+from .routers import scenarios_new as scenarios_router
+from .routers import scripts as scripts_router
 from models import APISettings
 
 
@@ -23,32 +24,26 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     settings = APISettings()  # type: ignore[call-arg]
 
-    app = FastAPI(title="GNS3 Scenario Service", version="0.1.0")
+    app = FastAPI(title="GNS3 Topology & Scenario Service", version="0.3.0")
     app.state.settings = settings
     app.dependency_overrides[get_settings] = lambda: settings
 
-    app.include_router(scenario_router.router)
-    app.include_router(dhcp_router.router)
-    app.include_router(scripts_router.router)
+    # Topology endpoints (infrastructure definitions)
     app.include_router(topologies_router.router)
+    # Scenario endpoints (notebook-style instructions)
+    app.include_router(scenarios_router.router)
+    # GNS3 proxy endpoints
+    app.include_router(gns3_router.router)
+    # DHCP assignment
+    app.include_router(dhcp_router.router)
+    # Script management
+    app.include_router(scripts_router.router)
+    # Logging/submission
+    app.include_router(logging_router.router)
+    # Instructor tools
+    app.include_router(instructor_router.router)
 
-    @app.on_event("startup")
-    async def warm_template_cache() -> None:
-        def _refresh() -> None:
-            refresh_templates_cache(
-                base_url=settings.gns3_base_url,
-                cache_path=settings.templates_cache_path,
-                username=settings.gns3_username,
-                password=settings.gns3_password,
-                server_ip=settings.gns3_server_ip,
-                server_port=settings.gns3_server_port,
-            )
-
-        try:
-            await asyncio.to_thread(_refresh)
-        except TemplateCacheError as exc:
-            logger.exception("Failed to refresh GNS3 template cache: %s", exc)
-            raise
+    # No startup dependency on GNS3 - all connection details come from frontend
 
     @app.get("/health", tags=["meta"])
     async def healthcheck() -> dict[str, str]:

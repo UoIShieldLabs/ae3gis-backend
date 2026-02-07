@@ -18,10 +18,15 @@ from .telnet_client import TelnetSettings, open_console, TelnetConsole
 
 @dataclass(slots=True)
 class ScriptSpec:
-    """Specification describing how a script should be pushed to a node."""
+    """Specification describing how a script should be pushed to a node.
+    
+    Either `content` or `local_path` must be provided. If `content` is set,
+    the script content is used directly. Otherwise, `local_path` is read.
+    """
 
-    local_path: Path
     remote_path: str
+    content: str | None = None
+    local_path: Path | None = None
     run_after_upload: bool = False
     executable: bool = True
     overwrite: bool = True
@@ -71,7 +76,7 @@ class ScriptTask:
 
 
 class ScriptPusher:
-    """Push local scripts to remote nodes over telnet."""
+    """Push scripts to remote nodes over telnet."""
 
     def __init__(self, scripts_base_dir: Path | None = None) -> None:
         self._base_dir = scripts_base_dir
@@ -94,6 +99,15 @@ class ScriptPusher:
             raise FileNotFoundError(candidate)
         return candidate
 
+    def _get_payload(self, spec: ScriptSpec) -> bytes:
+        """Get script content as bytes, from content string or local file."""
+        if spec.content is not None:
+            return spec.content.encode("utf-8")
+        if spec.local_path is not None:
+            local_path = self.resolve_local_path(spec.local_path)
+            return local_path.read_bytes()
+        raise ValueError("ScriptSpec must have either 'content' or 'local_path'")
+
     async def push(
         self,
         node_name: str,
@@ -101,15 +115,15 @@ class ScriptPusher:
         port: int,
         spec: ScriptSpec,
     ) -> ScriptPushResult:
-        local_path = self.resolve_local_path(spec.local_path)
-        payload = local_path.read_bytes()
+        payload = self._get_payload(spec)
         b64_payload = base64.b64encode(payload).decode("ascii")
         b64_lines = textwrap.wrap(b64_payload, 120)
         tmp_remote = f"/tmp/.upload_{uuid.uuid4().hex}.b64"
         remote_path = spec.remote_path
 
         settings = TelnetSettings(host=host, port=port)
-        print(f"Pushing {local_path} to {node_name} ({host}:{port}) as {remote_path}")
+        source_desc = "content" if spec.content else str(spec.local_path)
+        print(f"Pushing {source_desc} to {node_name} ({host}:{port}) as {remote_path}")
         try:
             async with open_console(settings) as console:
                 if not spec.overwrite and await self._remote_file_exists(console, remote_path):
